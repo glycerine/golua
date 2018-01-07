@@ -1,10 +1,15 @@
 package lua
 
-//#include <lua.h>
-//#include <lauxlib.h>
-//#include <lualib.h>
-//#include <stdlib.h>
-//#include "golua.h"
+/*
+#cgo CFLAGS: -I ${SRCDIR}/LuaJIT/src
+#cgo LDFLAGS: ${SRCDIR}/LuaJIT/src/libluajit.a
+
+#include <lua.h>
+#include <lauxlib.h>
+#include <lualib.h>
+#include <stdlib.h>
+#include "golua.h"
+*/
 import "C"
 import "unsafe"
 

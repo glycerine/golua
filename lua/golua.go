@@ -1,7 +1,7 @@
 package lua
 
 /*
-#cgo CFLAGS: -I ${SRCDIR}/lua
+#cgo CFLAGS: -I ${SRCDIR}/LuaJIT/src
 
 #include <lua.h>
 #include <lualib.h>

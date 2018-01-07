@@ -1,8 +1,8 @@
-#include <lua.h>
-#include <lauxlib.h>
-#include <lualib.h>
+#include "LuaJIT/src/lua.h"
+#include "LuaJIT/src/lauxlib.h"
+#include "LuaJIT/src/lualib.h"
 #include <stdint.h>
-#include <stdio.h>
+#include  <stdio.h>
 #include "_cgo_export.h"
 
 #define MT_GOFUNCTION "GoLua.GoFunction"
