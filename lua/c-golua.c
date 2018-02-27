@@ -1,7 +1,10 @@
-#include "LuaJIT/src/lua.h"
-#include "LuaJIT/src/lauxlib.h"
-#include "LuaJIT/src/lualib.h"
+#include "lua.h"
+#include "lauxlib.h"
+#include "lualib.h"
+#define LJ_HASFFI 1
+#include "luajit-ffi-ctypeid.h"
 #include <stdint.h>
+#include <stdlib.h> // _atoi64 on windows, atoll on posix.
 #include  <stdio.h>
 #include "_cgo_export.h"
 
@@ -12,6 +15,16 @@
 
 static const char GoStateRegistryKey = 'k'; //golua registry key
 static const char PanicFIDRegistryKey = 'k';
+
+/* makes sure we compile in atoll/_atoi64 if available.*/
+long long int wrapAtoll(const char *nptr)
+{
+#if _WIN32 || _WIN64
+  return _atoi64(nptr);
+#else
+  return atoll(nptr);
+#endif
+}
 
 /* taken from lua5.2 source */
 void *testudata(lua_State *L, int ud, const char *tname)
@@ -392,4 +405,18 @@ void clua_setexecutionlimit(lua_State* L, int n)
 	lua_sethook(L, &clua_hook_function, LUA_MASKCOUNT, n);
 }
 
+/*return the ctype of the cdata at the top of the stack*/
+uint32_t clua_luajit_ctypeid(lua_State *L, int idx)
+{
+  return luajit_ctypeid(L, idx);
+}
 
+void clua_luajit_push_cdata_int64(lua_State *L, int64_t n)
+{
+  return luajit_push_cdata_int64(L, n);
+}
+
+void clua_luajit_push_cdata_uint64(lua_State *L, uint64_t u)
+{
+  return luajit_push_cdata_uint64(L, u);
+}

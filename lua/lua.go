@@ -6,8 +6,9 @@
 package lua
 
 /*
-#cgo CFLAGS: -I ${SRCDIR}/LuaJIT/src
-#cgo LDFLAGS: ${SRCDIR}/LuaJIT/src/libluajit.a
+#cgo CFLAGS: -I ${SRCDIR}/../../../LuaJIT/LuaJIT/src
+#cgo LDFLAGS: ${SRCDIR}/../../../LuaJIT/LuaJIT/src/libluajit.a -lm
+#cgo (linux OR darwin) LDFLAGS: -ldl
 
 #include <lua.h>
 #include <stdlib.h>
@@ -127,7 +128,7 @@ func (L *State) SetMetaMethod(methodName string, f LuaGoFunction) {
 
 // Pushes a Go struct onto the stack as user data.
 //
-// The user data will be rigged so that lua code can access and change to public members of simple types directly
+// The user data will be rigged so that lua code can access and change the public members of simple types directly
 func (L *State) PushGoStruct(iface interface{}) {
 	iid := L.register(iface)
 	C.clua_pushgostruct(L.s, C.uint(iid))
@@ -328,7 +329,42 @@ func (L *State) LessThan(index1, index2 int) bool {
 
 // Creates a new lua interpreter state with the given allocation function
 func NewStateAlloc(f Alloc) *State {
+	// ../example/alloc.go panics:
+	/*
+		jaten@Jasons-MacBook-Pro ~/go/src/github.com/glycerine/golua/example (master) $ go run alloc.go
+		go run alloc.go
+		Must use luaL_newstate() for 64 bit target
+		fatal error: unexpected signal during runtime execution
+		[signal SIGSEGV: segmentation violation code=0x1 addr=0x8 pc=0x40a5a30]
+
+		runtime stack:
+		runtime.throw(0x414538e, 0x2a)
+			/usr/local/go/src/runtime/panic.go:605 +0x95
+		runtime.sigpanic()
+			/usr/local/go/src/runtime/signal_unix.go:351 +0x2b8
+
+		goroutine 1 [syscall, locked to thread]:
+		runtime.cgocall(0x409e100, 0xc42005be40, 0x41450a4)
+			/usr/local/go/src/runtime/cgocall.go:132 +0xe4 fp=0xc42005be00 sp=0xc42005bdc0 pc=0x4004494
+		github.com/glycerine/golua/lua._Cfunc_clua_setgostate(0x0, 0xc42009a0c0)
+			github.com/glycerine/golua/lua/_obj/_cgo_gotypes.go:432 +0x45 fp=0xc42005be40 sp=0xc42005be00 pc=0x40975c5
+		github.com/glycerine/golua/lua.newState.func1(0x0, 0xc42009a0c0)
+			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:33 +0x6a fp=0xc42005be78 sp=0xc42005be40 pc=0x409bb2a
+		github.com/glycerine/golua/lua.newState(0x0, 0x0)
+			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:33 +0x154 fp=0xc42005bef0 sp=0xc42005be78 pc=0x409a5e4
+		github.com/glycerine/golua/lua.NewStateAlloc(0x4146538, 0xc420082058)
+			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:332 +0x5b fp=0xc42005bf18 sp=0xc42005bef0 pc=0x409ac7b
+		main.main()
+			/Users/jaten/go/src/github.com/glycerine/golua/example/alloc.go:42 +0x31 fp=0xc42005bf80 sp=0xc42005bf18 pc=0x409d221
+		runtime.main()
+			/usr/local/go/src/runtime/proc.go:185 +0x20d fp=0xc42005bfe0 sp=0xc42005bf80 pc=0x402bb7d
+		runtime.goexit()
+			/usr/local/go/src/runtime/asm_amd64.s:2337 +0x1 fp=0xc42005bfe8 sp=0xc42005bfe0 pc=0x4053b51
+		exit status 2
+		jaten@Jasons-MacBook-Pro ~/go/src/github.com/glycerine/golua/example (master) $
+	*/
 	ls := C.clua_newstate(unsafe.Pointer(&f))
+
 	return newState(ls)
 }
 
@@ -352,13 +388,28 @@ func (L *State) Next(index int) int {
 }
 
 // lua_objlen
+//
+// Returns the "length" of the value at the
+// given acceptable index: for strings, this
+// is the string length; for tables, this
+// is the result of the length operator ('#');
+// for userdata, this is the size of the block
+// of memory allocated for the userdata;
+// for other values, it is 0.
+// jea note: Despite the misleading description
+// above, in 5.1 or LuaJit, ObjLen does not call
+// the metamethod __len(). In 5.2 it was split
+// into len and rawlen, with len calling the __len
+// metamethod.
+//
 func (L *State) ObjLen(index int) uint {
 	return uint(C.lua_objlen(L.s, C.int(index)))
 }
 
 // lua_pop
 func (L *State) Pop(n int) {
-	//Why is this implemented this way? I don't get it...
+	//Why is this implemented this way? I don't get it... maybe it
+	// is just inlining manually the actual implementation.
 	//C.lua_pop(L.s, C.int(n));
 	C.lua_settop(L.s, C.int(-n-1))
 }
@@ -397,7 +448,7 @@ func (L *State) PushNil() {
 
 // lua_pushnumber
 func (L *State) PushNumber(n float64) {
-	C.lua_pushnumber(L.s, C.lua_Number(n))
+	C.lua_pushnumber(L.s, C.lua_Number(n)) // lua_Number is a cast
 }
 
 // lua_pushthread
@@ -552,6 +603,18 @@ func (L *State) ToNumber(index int) float64 {
 	return float64(C.lua_tonumber(L.s, C.int(index)))
 }
 
+func (L *State) CdataToInt64(index int) int64 {
+	return int64(C.lua_cdata_to_int64(L.s, C.int(index)))
+}
+
+func (L *State) CdataToInt32(index int) int32 {
+	return int32(C.lua_cdata_to_int32(L.s, C.int(index)))
+}
+
+func (L *State) CdataToUint64(index int) uint64 {
+	return uint64(C.lua_cdata_to_uint64(L.s, C.int(index)))
+}
+
 // lua_topointer
 func (L *State) ToPointer(index int) uintptr {
 	return uintptr(C.lua_topointer(L.s, C.int(index)))
@@ -666,4 +729,18 @@ func (L *State) RaiseError(msg string) {
 
 func (L *State) NewError(msg string) *LuaError {
 	return &LuaError{0, msg, L.StackTrace()}
+}
+
+// LuaJIT only: return ctype of the cdata at the top of the stack.
+func (L *State) LuaJITctypeID(idx int) uint32 {
+	res := C.clua_luajit_ctypeid(L.s, C.int(idx))
+	return uint32(res)
+}
+
+func (L *State) PushInt64(n int64) {
+	C.clua_luajit_push_cdata_int64(L.s, C.int64_t(n))
+}
+
+func (L *State) PushUint64(u uint64) {
+	C.clua_luajit_push_cdata_uint64(L.s, C.uint64_t(u))
 }

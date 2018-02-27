@@ -1,8 +1,10 @@
 package lua
 
 /*
-#cgo CFLAGS: -I ${SRCDIR}/LuaJIT/src
-#cgo LDFLAGS: ${SRCDIR}/LuaJIT/src/libluajit.a
+#cgo CFLAGS: -I ${SRCDIR}/../../../LuaJIT/LuaJIT/src
+#cgo LDFLAGS: ${SRCDIR}/../../../LuaJIT/LuaJIT/src/libluajit.a
+#cgo linux LDFLAGS: -ldl
+#cgo darwin LDFLAGS: -ldl
 
 #include <lua.h>
 #include <lauxlib.h>
@@ -181,7 +183,7 @@ func NewState() *State {
 // luaL_openlibs
 func (L *State) OpenLibs() {
 	C.luaL_openlibs(L.s)
-	C.clua_hide_pcall(L.s)
+	//C.clua_hide_pcall(L.s)
 }
 
 // luaL_optinteger
