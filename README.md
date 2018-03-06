@@ -100,12 +100,14 @@ err := L.Call(0, 0)
 ON COROUTINES
 ---------------------
 
-Lua's coroutines exit and have been tested; ToThread()
+Lua's coroutines exist and have been tested. ToThread()
 and NewThread() work, and calls to registered Go functions can
-be made from any Lua coroutine. Registrations made
-on any coroutine are shared among all coroutines within
-that state. Registrations are per- lua.State, and
-are not globally shared between lua.State.
+be made from any Lua coroutine.
+
+Registrations made on any coroutine are
+shared among all coroutines within
+that state. Registrations are per-`lua.State`, and
+are not globally shared between `lua.State`s.
 
 ON GOROUTINE SAFETY
 ---------------------
