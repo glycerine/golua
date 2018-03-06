@@ -97,10 +97,23 @@ err := L.Call(0, 0)
 …
 ```
 
-ON THREADS AND COROUTINES
+ON COROUTINES
 ---------------------
 
-'lua.State' is not thread safe, but the library itself is. Lua's coroutines exist but (to my knowledge) have never been tested and are likely to encounter the same problems that errors have, use at your own peril.
+Lua's coroutines exit and have been tested; ToThread()
+and NewThread() work, and calls to registerd Go functions can
+be made from any Lua coroutine. Registrations made
+on any coroutine are shared among all coroutines within
+that state. Registrations are per- lua.State, and
+are not globally shared between lua.State.
+
+ON GOROUTINE SAFETY
+---------------------
+
+From the Go perspective of actual
+multithreading, the basic 'lua.State' is not thread safe.
+For safety, access a lua.State from a single goroutine
+or add locks around the lua.State to synchronize access.
 
 ODDS AND ENDS
 ---------------------
