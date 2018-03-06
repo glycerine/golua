@@ -152,12 +152,8 @@ int callback_function(lua_State* coro)
   size_t mainIndex = clua_getgostate(mainThread);
   
   // jea: the metatable is on the stack.
-  golua_printstack(coro, mainIndex);
-  
   //remove the userdata metatable (go function??) from the stack (to present same behavior as lua_CFunctions)
   lua_remove(coro, 1);
-
-  golua_printstack(coro, mainIndex);
   
   return golua_callgofunction(coro, coro_index, mainIndex, mainThread, fid!=NULL ? *fid : -1);
 }
