@@ -13,7 +13,10 @@ package lua
 import "C"
 
 import (
+	"fmt"
+	"github.com/gijit/gi/pkg/verb"
 	"reflect"
+	"runtime/debug"
 	"sync"
 	"unsafe"
 )
@@ -28,7 +31,7 @@ type LuaGoFunction func(L *State) int
 //export State
 type State struct {
 	// Wrapped lua_State object
-	s *C.lua_State
+	S *C.lua_State
 
 	// index of this object inside the goStates array
 	Index int
@@ -113,7 +116,9 @@ func registerGoState(L *State) {
 func unregisterGoState(L *State) {
 	goStatesMutex.Lock()
 	defer goStatesMutex.Unlock()
-	delete(goStates, L.Index)
+	if L.Index > 0 {
+		delete(goStates, L.Index)
+	}
 }
 
 func getGoState(gostateindex int) *State {
@@ -122,29 +127,61 @@ func getGoState(gostateindex int) *State {
 	return goStates[gostateindex]
 }
 
+//export golua_printstack
+func golua_printstack(coro *C.lua_State, mainIndex uintptr) {
+	fmt.Printf("golua_printstack() top, called with coro='%p', mainIndex=%v\n", coro, mainIndex) // coro = ; mainIndex =1
+	L := getGoState(int(mainIndex))
+	fmt.Printf("golua_printstack, L back is: '%#v'\n", L)
+	L1 := L.ToThreadHelper(coro)
+	fmt.Printf("golua_printstack, L1 back is: '%#v'\n", L1)
+	DumpLuaStack(L1)
+	fmt.Printf("golua_printstack, done with L1 stack dump.\n")
+}
+
 //export golua_callgofunction
-func golua_callgofunction(curThread *C.lua_State, gostateindex uintptr, mainIndex uintptr, mainThread *C.lua_State, fid uint) int {
+func golua_callgofunction(coro *C.lua_State, coro_index uintptr, mainIndex uintptr, mainThread *C.lua_State, fid uint) int {
+
+	defer func() {
+		r := recover()
+		if r != nil {
+			fmt.Printf("problem in golua_callgofunction, panic happened: '%v' at\n%s\n", r, string(debug.Stack()))
+			panic(r) // resume panic
+		}
+	}()
+
+	pp("jea debug: golua_callgofunction or __call, fid=%v. mainIndex='%v'. mainThread='%#v', coro_index='%#v', coro is '%p'/'%#v'\n", fid, mainIndex, mainThread, coro_index, coro, coro) // , string(debug.Stack()))
 
 	var L1 *State
-	if gostateindex == 0 {
+	if coro_index == 0 {
 		// lua side created goroutine, first time seen;
 		// and not yet registered on the go-side.
-		L := getGoState(int(mainIndex))
+		pp("debug: first time this coroutine has been seen on the Go side\n")
 
-		if mainThread != nil && L.s != mainThread {
+		L := getGoState(int(mainIndex))
+		if mainThread != nil && L.S != mainThread {
+			pp("\n debug: bad: mainThread pointers disagree. %p vs %p\n", L.S, mainThread)
 			panic("mainThread pointers disaggree")
 		}
-		L1 = L.ToThreadHelper(curThread)
+		pp("\n debug: good: mainThread pointers agree: %p and mainThread:%p\n", L.S, mainThread)
+		L1 = L.ToThreadHelper(coro)
 	} else {
-
 		// this is the __call() for the MT_GOFUNCTION
-		L1 = getGoState(int(gostateindex))
+		L1 = getGoState(int(coro_index))
 	}
 
+	pp("L1 corresponding to coro_index '%v' -> '%#v'\n", coro_index, L1)
 	if fid < 0 {
 		panic(&LuaError{0, "Requested execution of an unknown function", L1.StackTrace()})
 	}
 	f := L1.Shared.registry[fid].(LuaGoFunction)
+	pp("\n jea debug golua_callgofunction: f back from registry for fid=%#v, is f=%#v\n", fid, f)
+
+	pp("\n jea debug: in golua_callgofunction(): L1 stack is:\n")
+	if verb.VerboseVerbose {
+		DumpLuaStack(L1)
+	}
+
+	pp("\n jea debug, in golua_callgofunction(): right before final f(L1) call.\n")
 	return f(L1)
 }
 
@@ -164,12 +201,12 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 		fval = fval.Elem()
 	}
 
-	luatype := LuaValType(C.lua_type(L.s, 3))
+	luatype := LuaValType(C.lua_type(L.S, 3))
 
 	switch fval.Kind() {
 	case reflect.Bool:
 		if luatype == LUA_TBOOLEAN {
-			fval.SetBool(int(C.lua_toboolean(L.s, 3)) != 0)
+			fval.SetBool(int(C.lua_toboolean(L.S, 3)) != 0)
 			return 1
 		} else {
 			L.PushString("Wrong assignment to field " + field_name)
@@ -186,7 +223,7 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 		fallthrough
 	case reflect.Int64:
 		if luatype == LUA_TNUMBER {
-			fval.SetInt(int64(C.lua_tointeger(L.s, 3)))
+			fval.SetInt(int64(C.lua_tointeger(L.S, 3)))
 			return 1
 		} else {
 			L.PushString("Wrong assignment to field " + field_name)
@@ -203,7 +240,7 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 		fallthrough
 	case reflect.Uint64:
 		if luatype == LUA_TNUMBER {
-			fval.SetUint(uint64(C.lua_tointeger(L.s, 3)))
+			fval.SetUint(uint64(C.lua_tointeger(L.S, 3)))
 			return 1
 		} else {
 			L.PushString("Wrong assignment to field " + field_name)
@@ -212,7 +249,7 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 
 	case reflect.String:
 		if luatype == LUA_TSTRING {
-			fval.SetString(C.GoString(C.lua_tolstring(L.s, 3, nil)))
+			fval.SetString(C.GoString(C.lua_tolstring(L.S, 3, nil)))
 			return 1
 		} else {
 			L.PushString("Wrong assignment to field " + field_name)
@@ -223,7 +260,7 @@ func golua_interface_newindex_callback(gostateindex uintptr, iid uint, field_nam
 		fallthrough
 	case reflect.Float64:
 		if luatype == LUA_TNUMBER {
-			fval.SetFloat(float64(C.lua_tonumber(L.s, 3)))
+			fval.SetFloat(float64(C.lua_tonumber(L.S, 3)))
 			return 1
 		} else {
 			L.PushString("Wrong assignment to field " + field_name)
@@ -307,9 +344,9 @@ func golua_interface_index_callback(gostateindex uintptr, iid uint, field_name *
 }
 
 //export golua_gchook
-func golua_gchook(gostateindex uintptr, id uint) int {
-	L1 := getGoState(int(gostateindex))
-	L1.unregister(id)
+func golua_gchook(main_index uintptr, id uint) int {
+	L := getGoState(int(main_index))
+	L.unregister(id)
 	return 0
 }
 

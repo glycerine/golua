@@ -52,7 +52,8 @@ static lua_State* getMainThread(lua_State* L) {
     // stack: uniqArray
 
     if (lua_isnil(L,-1)) {
-      //printf("\n debug: arg. nil back for UniqKey lookup.\n");
+      printf("\n debug: arg. nil back for UniqKey lookup.\n");
+      exit(-1);
     }
     
     lua_pushnumber(L, 1);
@@ -61,10 +62,8 @@ static lua_State* getMainThread(lua_State* L) {
     // stack: main *lua_State, uniqArray
 
     int ty = lua_type(L, -1);
-    //printf("\ndebug: top on top : %d.\n", ty);    
     
     lua_State* mainThread = lua_tothread(L, -1);
-    //printf("\ndebug: UniqKey -> mainThread : %p.\n", mainThread);
     
     lua_settop(L, top);
 
@@ -115,59 +114,64 @@ unsigned int* clua_checkgosomething(lua_State* L, int index, const char *desired
 
 size_t clua_getgostate(lua_State* L)
 {
-	size_t gostateindex;
-	//get gostate from registry entry
-	lua_pushlightuserdata(L,(void*)&GoMainStatesKey);
-	lua_gettable(L, LUA_REGISTRYINDEX); // pushes value onto top of stack
+  size_t gostateindex;
 
-    // 'k' is now a map from lua_State* to index
-    // push key
-    lua_pushthread(L);
-    // stack is now:
-    //  key
-    //  map
-    lua_gettable(L, -2);
-    // stack is now
-    //  index value
-    //  map
+  //get gostate from registry entry
+  lua_pushlightuserdata(L,(void*)&GoMainStatesKey);
+  lua_gettable(L, LUA_REGISTRYINDEX); // pushes value onto top of stack
 
-    // if nil, return 0
-    if (lua_isnil(L, -1)) {
-      gostateindex = (size_t)(0);
-    } else {
-      gostateindex = (size_t)lua_touserdata(L, -1);
-    }
-	lua_pop(L, 2);
-	return gostateindex;
+  // 'k' is now a map from lua_State* to index
+  // push key
+  lua_pushthread(L);
+  // stack is now:
+  //  key
+  //  map
+  lua_gettable(L, -2);
+  // stack is now
+  //  index value
+  //  map
+
+  // if nil, enter it, so it is recorded.
+  if (lua_isnil(L, -1)) {
+    gostateindex = (size_t)(0);
+  } else {
+    gostateindex = (size_t)lua_tonumber(L, -1);
+  }
+  lua_pop(L, 2);
+  return gostateindex;
 }
 
 
 //wrapper for callgofunction
-int callback_function(lua_State* L)
+int callback_function(lua_State* coro)
 {
-	int r;
-	unsigned int *fid = clua_checkgosomething(L, 1, MT_GOFUNCTION);
-	size_t gostateindex = clua_getgostate(L);
-    lua_State* mainThread = getMainThread(L);
-	size_t mainIndex = clua_getgostate(mainThread);
-    
-    // jea: the metatable is on the stack.
-    
-	//remove the userdata metatable (go function??) from the stack (to present same behavior as lua_CFunctions)
-	lua_remove(L, 1);
-    
-	return golua_callgofunction(L, gostateindex, mainIndex, mainThread, fid!=NULL ? *fid : -1);
+  int r;
+  unsigned int *fid = clua_checkgosomething(coro, 1, MT_GOFUNCTION);
+  size_t coro_index = clua_getgostate(coro);
+  lua_State* mainThread = getMainThread(coro);
+  size_t mainIndex = clua_getgostate(mainThread);
+  
+  // jea: the metatable is on the stack.
+  golua_printstack(coro, mainIndex);
+  
+  //remove the userdata metatable (go function??) from the stack (to present same behavior as lua_CFunctions)
+  lua_remove(coro, 1);
+
+  golua_printstack(coro, mainIndex);
+  
+  return golua_callgofunction(coro, coro_index, mainIndex, mainThread, fid!=NULL ? *fid : -1);
 }
 
 //wrapper for gchook
 int gchook_wrapper(lua_State* L)
 {
-	//printf("Garbage collection wrapper\n");
-	unsigned int* fid = clua_checkgosomething(L, -1, NULL);
-	size_t gostateindex = clua_getgostate(L);
-	if (fid != NULL)
-		return golua_gchook(gostateindex,*fid);
-	return 0;
+  unsigned int* fid = clua_checkgosomething(L, -1, NULL);
+  if (fid != NULL) {
+    lua_State*  mainThread = getMainThread(L);
+    size_t main_index = clua_getgostate(mainThread);
+    return golua_gchook(main_index, *fid);
+  }
+  return 0;
 }
 
 unsigned int clua_togofunction(lua_State* L, int index)
@@ -190,11 +194,14 @@ void clua_pushgofunction(lua_State* L, unsigned int fid)
 	lua_setmetatable(L, -2);
 }
 
-static int callback_c (lua_State* L)
+static int callback_c (lua_State* coro)
 {
-	int fid = clua_togofunction(L,lua_upvalueindex(1));
-	size_t gostateindex = clua_getgostate(L);
-	return golua_callgofunction(L, gostateindex, 0, getMainThread(L), fid);
+	int fid = clua_togofunction(coro, lua_upvalueindex(1));
+	size_t coro_index = clua_getgostate(coro);
+    lua_State*  mainThread = getMainThread(coro);
+    size_t main_index = clua_getgostate(mainThread);
+    
+	return golua_callgofunction(coro, coro_index, main_index, mainThread, fid);
 }
 
 void clua_pushcallback(lua_State* L)
@@ -425,8 +432,6 @@ int clua_setgostate(lua_State* L, size_t gostateindex)
     clua_create_uniqArrayIfNotExists(L);
     
     // stack: Lmap
-
-    //printf("\ndebug: UniqKey setup in lua registry.\n");
   }
   // INVAR: our Lmap is at top of stack, -1 position.
   // stack: Lmap
@@ -467,7 +472,7 @@ int clua_setgostate(lua_State* L, size_t gostateindex)
   // stack: key, Lmap
   
   // value
-  lua_pushlightuserdata(L, (void*)gostateindex);
+  lua_pushnumber(L, gostateindex);
   // stack: value, key, Lmap
   
   // store key:value in map
