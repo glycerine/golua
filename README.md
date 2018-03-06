@@ -101,7 +101,7 @@ ON COROUTINES
 ---------------------
 
 Lua's coroutines exit and have been tested; ToThread()
-and NewThread() work, and calls to registerd Go functions can
+and NewThread() work, and calls to registered Go functions can
 be made from any Lua coroutine. Registrations made
 on any coroutine are shared among all coroutines within
 that state. Registrations are per- lua.State, and
