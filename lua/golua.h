@@ -13,7 +13,7 @@ unsigned int clua_togostruct(lua_State *L, int index);
 void clua_pushcallback(lua_State* L);
 void clua_pushgofunction(lua_State* L, unsigned int fid);
 void clua_pushgostruct(lua_State *L, unsigned int fid);
-void clua_setgostate(lua_State* L, size_t gostateindex);
+int clua_setgostate(lua_State* L, size_t gostateindex);
 size_t clua_getgostate(lua_State* L);
 GoInterface clua_atpanic(lua_State* L, unsigned int panicf_id);
 int clua_callluacfunc(lua_State* L, lua_CFunction f);
@@ -37,3 +37,8 @@ void clua_luajit_push_cdata_uint64(lua_State *L, uint64_t u);
 int clua_isgofunction(lua_State *L, int n);
 int clua_isgostruct(lua_State *L, int n);
 
+int clua_create_uniqArrayIfNotExists(lua_State* L);
+int clua_dedup_coro(lua_State* coro);
+
+// return upos, the array index into uniqArray for coro.
+int clua_addThreadToUniqArrayAndRevUniq(lua_State* L);

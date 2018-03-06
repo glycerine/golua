@@ -13,7 +13,25 @@
 
 #define GOLUA_DEFAULT_MSGHANDLER "golua_default_msghandler"
 
-static const char GoStateRegistryKey = 'k'; //golua registry key
+// golua registry key, main states only, non non-main coroutines.
+// The address of this constant is used as a unique
+// lightuserdata key.
+static const char GoMainStatesKey = 'k';
+
+// Within one main state, store the main state (at 1),
+// plus all other coroutines at uniqArray[pos > 1].
+// Stored in the per state Lua registry.
+// The address of this constant is used as a unique
+// lightuserdata key.
+static const char GoWithinStateUniqArrayKey = 'u'; //golua registry key, uniq array.
+
+// Within one main state's 
+// the reverseUniqMap maps *lua_State -> uPos
+// Stored in the per state Lua registry.
+// The address of this constant is used as a unique
+// lightuserdata key.
+static const char GoWithinStateRevUniqMap = 'r'; //in golua registry, reverse uniq map
+
 static const char PanicFIDRegistryKey = 'k';
 
 /* makes sure we compile in atoll/_atoi64 if available.*/
@@ -24,6 +42,33 @@ long long int wrapAtoll(const char *nptr)
 #else
   return atoll(nptr);
 #endif
+}
+
+static lua_State* getMainThread(lua_State* L) {
+    // experiment: can we get main from uniqArray[1]; it should be there.
+    int top = lua_gettop(L);
+    lua_pushlightuserdata(L, (void*)&GoWithinStateUniqArrayKey);
+	lua_gettable(L, LUA_REGISTRYINDEX); // pushes value onto top of stack
+    // stack: uniqArray
+
+    if (lua_isnil(L,-1)) {
+      //printf("\n debug: arg. nil back for UniqKey lookup.\n");
+    }
+    
+    lua_pushnumber(L, 1);
+    // stack: 1, uniqArray
+    lua_gettable(L, -2);
+    // stack: main *lua_State, uniqArray
+
+    int ty = lua_type(L, -1);
+    //printf("\ndebug: top on top : %d.\n", ty);    
+    
+    lua_State* mainThread = lua_tothread(L, -1);
+    //printf("\ndebug: UniqKey -> mainThread : %p.\n", mainThread);
+    
+    lua_settop(L, top);
+
+    return mainThread;
 }
 
 /* taken from lua5.2 source */
@@ -72,10 +117,27 @@ size_t clua_getgostate(lua_State* L)
 {
 	size_t gostateindex;
 	//get gostate from registry entry
-	lua_pushlightuserdata(L,(void*)&GoStateRegistryKey);
-	lua_gettable(L, LUA_REGISTRYINDEX);
-	gostateindex = (size_t)lua_touserdata(L,-1);
-	lua_pop(L,1);
+	lua_pushlightuserdata(L,(void*)&GoMainStatesKey);
+	lua_gettable(L, LUA_REGISTRYINDEX); // pushes value onto top of stack
+
+    // 'k' is now a map from lua_State* to index
+    // push key
+    lua_pushthread(L);
+    // stack is now:
+    //  key
+    //  map
+    lua_gettable(L, -2);
+    // stack is now
+    //  index value
+    //  map
+
+    // if nil, return 0
+    if (lua_isnil(L, -1)) {
+      gostateindex = (size_t)(0);
+    } else {
+      gostateindex = (size_t)lua_touserdata(L, -1);
+    }
+	lua_pop(L, 2);
 	return gostateindex;
 }
 
@@ -86,9 +148,15 @@ int callback_function(lua_State* L)
 	int r;
 	unsigned int *fid = clua_checkgosomething(L, 1, MT_GOFUNCTION);
 	size_t gostateindex = clua_getgostate(L);
-	//remove the go function from the stack (to present same behavior as lua_CFunctions)
-	lua_remove(L,1);
-	return golua_callgofunction(gostateindex, fid!=NULL ? *fid : -1);
+    lua_State* mainThread = getMainThread(L);
+	size_t mainIndex = clua_getgostate(mainThread);
+    
+    // jea: the metatable is on the stack.
+    
+	//remove the userdata metatable (go function??) from the stack (to present same behavior as lua_CFunctions)
+	lua_remove(L, 1);
+    
+	return golua_callgofunction(L, gostateindex, mainIndex, mainThread, fid!=NULL ? *fid : -1);
 }
 
 //wrapper for gchook
@@ -126,7 +194,7 @@ static int callback_c (lua_State* L)
 {
 	int fid = clua_togofunction(L,lua_upvalueindex(1));
 	size_t gostateindex = clua_getgostate(L);
-	return golua_callgofunction(gostateindex,fid);
+	return golua_callgofunction(L, gostateindex, 0, getMainThread(L), fid);
 }
 
 void clua_pushcallback(lua_State* L)
@@ -149,14 +217,269 @@ int default_panicf(lua_State *L)
 	abort();
 }
 
-void clua_setgostate(lua_State* L, size_t gostateindex)
-{
-	lua_atpanic(L, default_panicf);
-	lua_pushlightuserdata(L,(void*)&GoStateRegistryKey);
-	lua_pushlightuserdata(L, (void*)gostateindex);
-	//set into registry table
-	lua_settable(L, LUA_REGISTRYINDEX);
+
+void create_uniqArray(lua_State* L) {
+  // stack: ...
+  
+  lua_newtable(L);
+  // stack: newtable, ...
+  
+  lua_pushlightuserdata(L,(void*)&GoWithinStateUniqArrayKey);
+  // stack: ukey, newtable, ...
+  
+  lua_insert(L, -2);    
+  // stack: newtable, ukey, ...
+  
+  lua_settable(L, LUA_REGISTRYINDEX);
+  // stack: ...
+
+  // and create the reverse uniq map: *lua_State -> uPos
+  lua_newtable(L);
+  // stack: newtable, ...
+  
+  lua_pushlightuserdata(L,(void*)&GoWithinStateRevUniqMap);
+  // stack: urevkey, newtable, ...
+  
+  lua_insert(L, -2);    
+  // stack: newtable, urevkey, ...
+  
+  lua_settable(L, LUA_REGISTRYINDEX);
+  // stack: ...
 }
+
+// return 1 if created, 0 if already existed.
+int clua_create_uniqArrayIfNotExists(lua_State* L) {
+  // stack: ...
+  
+  lua_pushlightuserdata(L,(void*)&GoWithinStateUniqArrayKey);
+  // stack: ukey, ...
+  lua_gettable(L, LUA_REGISTRYINDEX);
+  // stack: (uniqArray or nil), ...
+
+  if (lua_isnil(L, -1)) {
+      lua_pop(L, 1);
+      // stack: ...
+      create_uniqArray(L);
+      // stack: ...
+      return 1;
+  }
+  lua_pop(L, 1);
+  // stack: ...
+  return 0;
+}
+
+int clua_addThreadToUniqArrayAndRevUniq(lua_State* L);
+
+// clua_known_coro returns the index
+// of L in uniqArray, adding L to
+// uniqArray and revUniqMap if it
+// is not already present in revUniqMap.
+//
+// POST INVAR:
+// On return of value uPos, uniqArray[uPos] == L
+// and revUniqMap[L] == uPos.
+// 
+// The returned value will be >= 1.
+// 
+int clua_dedup_coro(lua_State* L)
+{
+  if (1 == clua_create_uniqArrayIfNotExists(L)) {
+    return clua_addThreadToUniqArrayAndRevUniq(L);
+  }
+  
+  int top = lua_gettop(L);
+
+  // use revUniqMap, for O(1) lookup.
+
+  // store pos into revUniqMap too, for O(1) coroutine lookup.
+  lua_pushlightuserdata(L, (void*)&GoWithinStateRevUniqMap);
+  // stack: revkey
+
+  lua_gettable(L, LUA_REGISTRYINDEX);
+  // stack: revUniqMap
+
+  int isMain = lua_pushthread(L);
+  // stack: thread, revUniqMap
+    
+  lua_gettable(L, -2);
+  // stack: (pos or nil), revUniqMap
+
+  if (lua_isnil(L, -1)) {
+    // stack: nil, revUniqMap
+    
+    // not previously known
+    lua_settop(L, top);
+    // stack clean
+
+    // add it
+    return clua_addThreadToUniqArrayAndRevUniq(L);    
+  }
+  
+  // stack: pos, revUniqMap
+  int res = (int)lua_tonumber(L, -1);
+  
+  lua_settop(L, top);
+  // stack clean
+  return res;
+}
+
+int clua_addThreadToUniqArrayAndRevUniq(lua_State* L) {
+  // 
+  // Do the equivalent of: table.insert(uniqueArray, L)
+  //                   and then revUniq[L] = #uniqArray (==uPos)
+    
+  // stack: ...
+  int top = lua_gettop(L);
+  
+  lua_pushlightuserdata(L,(void*)&GoWithinStateUniqArrayKey);
+  // stack: ukey, ...
+
+  lua_gettable(L, LUA_REGISTRYINDEX);    
+  // stack: uniqArray, ...
+
+  // jea: now store the actual thread in uniqArray
+  //
+  lua_pushthread(L);
+  // stack: thread, uniqArray, ...
+
+  // append to array at -2
+  int pos = lua_objlen(L, -2) + 1; /* first empty element */
+
+  lua_rawseti(L, -2, pos);  /* t[pos] = v; and pops v from the top of the stack*/
+  // stack: uniqArray, ...
+
+  lua_pop(L, 1);
+  // stack: ...
+
+  // Phase 2:
+  // 
+  // store pos into revUniqMap too, for O(1) coroutine lookup.
+  lua_pushlightuserdata(L, (void*)&GoWithinStateRevUniqMap);
+  // stack: revkey, ...
+
+  lua_gettable(L, LUA_REGISTRYINDEX);
+  // stack: revUniqMap, ...
+
+  lua_pushthread(L);
+  // stack: thread, revUniqMap, ...
+    
+  lua_pushnumber(L, (double)pos);
+  // stack: pos, thread, revUniqMap, ...
+
+  lua_settable(L, -3);
+  // stack: revUniqMap, ...
+
+  lua_settop(L, top);
+  // stack clean
+
+  return pos;
+}
+
+int clua_setgostate(lua_State* L, size_t gostateindex)
+{
+  int ret = 0;
+  int top = lua_gettop(L);
+      
+  lua_atpanic(L, default_panicf);
+  lua_pushlightuserdata(L,(void*)&GoMainStatesKey);
+
+  //
+  // store L into a table that maps lua_State* -> gostateindex.
+  // Call the table the Lmap. It maps L to an index.
+  //
+  lua_gettable(L, LUA_REGISTRYINDEX); // pops the key
+  // does it already exist, or did we get nil back?
+  if (lua_isnil(L, -1)) {
+    // doesn't exist yet, need to create it the first time.
+    lua_pop(L, 1); // get rid of the nil
+    lua_newtable(L);
+
+    // save Lmap into lua registry under GoMainStatesKey.
+
+    // stack:
+    //   Lmap
+    lua_pushvalue(L, -1);
+    // stack:
+    //   Lmap
+    //   Lmap
+    
+    // get the key
+    lua_pushlightuserdata(L,(void*)&GoMainStatesKey);
+    // stack is now:
+    //  key
+    //  Lmap
+    //  Lmap
+
+    lua_insert(L, -2);
+    // stack should now be ready for lua_settable:
+    //  Lmap
+    //  key
+    //  Lmap
+
+    //set into registry table
+    lua_settable(L, LUA_REGISTRYINDEX);    
+    // stack:
+    //   Lmap
+
+    // and create the uniq array too, at the same time.
+    clua_create_uniqArrayIfNotExists(L);
+    
+    // stack: Lmap
+
+    //printf("\ndebug: UniqKey setup in lua registry.\n");
+  }
+  // INVAR: our Lmap is at top of stack, -1 position.
+  // stack: Lmap
+  
+  // does our key already exist in the Lmap?
+  // If not, then append to the uniqArray.
+  // key
+  lua_pushthread(L);
+  // stack: key, Lmap
+
+  lua_gettable(L, -2);
+  // stack: nil, Lmap  OR  priorValue, Lmap
+
+  if (!lua_isnil(L, -1)) {
+    // stack: priorValue, Lmap
+    // no duplicate insert into Lmap needed
+    lua_settop(L, top);
+    // stack clean.
+
+    // should be returning 1 always, indicating
+    // a main coroutine.
+    return clua_dedup_coro(L);
+  }
+  
+  // stack: thread, Lmap
+  lua_pop(L, 1);
+  // stack: Lmap
+  
+  // This thread, L, is not known to Lmap.
+  ret = clua_addThreadToUniqArrayAndRevUniq(L);
+
+  // stack: Lmap
+    
+  // Finally, populate the Lmap
+  
+  // key
+  lua_pushthread(L);
+  // stack: key, Lmap
+  
+  // value
+  lua_pushlightuserdata(L, (void*)gostateindex);
+  // stack: value, key, Lmap
+  
+  // store key:value in map
+  lua_settable(L, -3);
+  // stack: Lmap
+  
+  // cleanup stack, remove Lmap
+  lua_settop(L, top);
+
+  return ret;
+}
+
 
 /* called when lua code attempts to access a field of a published go object */
 int interface_index_callback(lua_State *L)
@@ -420,3 +743,4 @@ void clua_luajit_push_cdata_uint64(lua_State *L, uint64_t u)
 {
   return luajit_push_cdata_uint64(L, u);
 }
+

@@ -17,9 +17,12 @@ package lua
 
 */
 import "C"
-import "unsafe"
 
-import "fmt"
+import (
+	"unsafe"
+
+	"fmt"
+)
 
 type LuaStackEntry struct {
 	Name        string
@@ -29,34 +32,37 @@ type LuaStackEntry struct {
 }
 
 func newState(L *C.lua_State) *State {
-	newstate := &State{L, 0, make([]interface{}, 0, 8), make([]uint, 0, 8)}
-	registerGoState(newstate)
-	C.clua_setgostate(L, C.size_t(newstate.Index))
+	newstate := &State{
+		s:          L,
+		Shared:     newSharedByAllCoroutines(),
+		IsMainCoro: true,
+		CmainCo:    L,
+		AllCoro:    make(map[int]*State),
+	}
+	newstate.MainCo = newstate
+
+	// only for main states, not additional coroutines:
+	registerGoState(newstate) // sets Index
+	newstate.Upos = int(C.clua_setgostate(L, C.size_t(newstate.Index)))
+
+	// assert(Upos == 1)
+	if newstate.Upos != 1 {
+		panic(fmt.Sprintf("assert violated: we expected newstate.Upos for the main coro to always be at index 1: our code depends on that!"))
+	}
+	newstate.MainCo.AllCoro[newstate.Upos] = newstate
 	C.clua_initstate(L)
 	return newstate
 }
 
-func (L *State) addFreeIndex(i uint) {
-	freelen := len(L.freeIndices)
-	//reallocate if necessary
-	if freelen+1 > cap(L.freeIndices) {
-		newSlice := make([]uint, freelen, cap(L.freeIndices)*2)
-		copy(newSlice, L.freeIndices)
-		L.freeIndices = newSlice
-	}
-	//reslice
-	L.freeIndices = L.freeIndices[0 : freelen+1]
-	L.freeIndices[freelen] = i
-}
-
 func (L *State) getFreeIndex() (index uint, ok bool) {
-	freelen := len(L.freeIndices)
+	freelen := len(L.Shared.freeIndices)
 	//if there exist entries in the freelist
 	if freelen > 0 {
-		i := L.freeIndices[freelen-1] //get index
-		//fmt.Printf("Free indices before: %v\n", L.freeIndices)
-		L.freeIndices = L.freeIndices[0 : freelen-1] //'pop' index from list
-		//fmt.Printf("Free indices after: %v\n", L.freeIndices)
+		//get index
+		i := L.Shared.freeIndices[freelen-1]
+
+		//'pop' index from list
+		L.Shared.freeIndices = L.Shared.freeIndices[0 : freelen-1]
 		return i, true
 	}
 	return 0, false
@@ -64,31 +70,22 @@ func (L *State) getFreeIndex() (index uint, ok bool) {
 
 //returns the registered function id
 func (L *State) register(f interface{}) uint {
-	//fmt.Printf("Registering %v\n")
 	index, ok := L.getFreeIndex()
-	//fmt.Printf("\tfreeindex: index = %v, ok = %v\n", index, ok)
-	//if not ok, then we need to add new index by extending the slice
-	if !ok {
-		index = uint(len(L.registry))
-		//reallocate backing array if necessary
-		if index+1 > uint(cap(L.registry)) {
-			newSlice := make([]interface{}, index, cap(L.registry)*2)
-			copy(newSlice, L.registry)
-			L.registry = newSlice
-		}
-		//reslice
-		L.registry = L.registry[0 : index+1]
+	if ok {
+		// reuse
+		L.Shared.registry[index] = f
+		return index
 	}
-	//fmt.Printf("\tregistering %d %v\n", index, f)
-	L.registry[index] = f
+	// add a new index
+	L.Shared.registry = append(L.Shared.registry, f)
+	index = uint(len(L.Shared.registry)) - 1
 	return index
 }
 
 func (L *State) unregister(fid uint) {
-	//fmt.Printf("Unregistering %d (len: %d, value: %v)\n", fid, len(L.registry), L.registry[fid])
-	if (fid < uint(len(L.registry))) && (L.registry[fid] != nil) {
-		L.registry[fid] = nil
-		L.addFreeIndex(fid)
+	if (fid < uint(len(L.Shared.registry))) && (L.Shared.registry[fid] != nil) {
+		L.Shared.registry[fid] = nil
+		L.Shared.freeIndices = append(L.Shared.freeIndices, fid)
 	}
 }
 
@@ -158,7 +155,7 @@ func (L *State) AtPanic(panicf LuaGoFunction) (oldpanicf LuaGoFunction) {
 	oldres := interface{}(C.clua_atpanic(L.s, C.uint(fid)))
 	switch i := oldres.(type) {
 	case C.uint:
-		f := L.registry[uint(i)].(LuaGoFunction)
+		f := L.Shared.registry[uint(i)].(LuaGoFunction)
 		//free registry entry
 		L.unregister(uint(i))
 		return f
@@ -329,42 +326,8 @@ func (L *State) LessThan(index1, index2 int) bool {
 
 // Creates a new lua interpreter state with the given allocation function
 func NewStateAlloc(f Alloc) *State {
-	// ../example/alloc.go panics:
-	/*
-		jaten@Jasons-MacBook-Pro ~/go/src/github.com/glycerine/golua/example (master) $ go run alloc.go
-		go run alloc.go
-		Must use luaL_newstate() for 64 bit target
-		fatal error: unexpected signal during runtime execution
-		[signal SIGSEGV: segmentation violation code=0x1 addr=0x8 pc=0x40a5a30]
-
-		runtime stack:
-		runtime.throw(0x414538e, 0x2a)
-			/usr/local/go/src/runtime/panic.go:605 +0x95
-		runtime.sigpanic()
-			/usr/local/go/src/runtime/signal_unix.go:351 +0x2b8
-
-		goroutine 1 [syscall, locked to thread]:
-		runtime.cgocall(0x409e100, 0xc42005be40, 0x41450a4)
-			/usr/local/go/src/runtime/cgocall.go:132 +0xe4 fp=0xc42005be00 sp=0xc42005bdc0 pc=0x4004494
-		github.com/glycerine/golua/lua._Cfunc_clua_setgostate(0x0, 0xc42009a0c0)
-			github.com/glycerine/golua/lua/_obj/_cgo_gotypes.go:432 +0x45 fp=0xc42005be40 sp=0xc42005be00 pc=0x40975c5
-		github.com/glycerine/golua/lua.newState.func1(0x0, 0xc42009a0c0)
-			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:33 +0x6a fp=0xc42005be78 sp=0xc42005be40 pc=0x409bb2a
-		github.com/glycerine/golua/lua.newState(0x0, 0x0)
-			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:33 +0x154 fp=0xc42005bef0 sp=0xc42005be78 pc=0x409a5e4
-		github.com/glycerine/golua/lua.NewStateAlloc(0x4146538, 0xc420082058)
-			/Users/jaten/go/src/github.com/glycerine/golua/lua/lua.go:332 +0x5b fp=0xc42005bf18 sp=0xc42005bef0 pc=0x409ac7b
-		main.main()
-			/Users/jaten/go/src/github.com/glycerine/golua/example/alloc.go:42 +0x31 fp=0xc42005bf80 sp=0xc42005bf18 pc=0x409d221
-		runtime.main()
-			/usr/local/go/src/runtime/proc.go:185 +0x20d fp=0xc42005bfe0 sp=0xc42005bf80 pc=0x402bb7d
-		runtime.goexit()
-			/usr/local/go/src/runtime/asm_amd64.s:2337 +0x1 fp=0xc42005bfe8 sp=0xc42005bfe0 pc=0x4053b51
-		exit status 2
-		jaten@Jasons-MacBook-Pro ~/go/src/github.com/glycerine/golua/example (master) $
-	*/
+	// jea: ../example/alloc.go panics... hmm.
 	ls := C.clua_newstate(unsafe.Pointer(&f))
-
 	return newState(ls)
 }
 
@@ -375,11 +338,9 @@ func (L *State) NewTable() {
 
 // lua_newthread
 func (L *State) NewThread() *State {
-	//TODO: call newState with result from C.lua_newthread and return it
-	//TODO: should have same lists as parent
-	//		but may complicate gc
+
 	s := C.lua_newthread(L.s)
-	return &State{s, 0, nil, nil}
+	return L.ToThreadHelper(s)
 }
 
 // lua_next
@@ -565,7 +526,7 @@ func (L *State) ToGoFunction(index int) (f LuaGoFunction) {
 	if fid < 0 {
 		return nil
 	}
-	return L.registry[fid].(LuaGoFunction)
+	return L.Shared.registry[fid].(LuaGoFunction)
 }
 
 // Returns the value at index as a Go Struct (it must be something pushed with PushGoStruct)
@@ -577,7 +538,7 @@ func (L *State) ToGoStruct(index int) (f interface{}) {
 	if fid < 0 {
 		return nil
 	}
-	return L.registry[fid]
+	return L.Shared.registry[fid]
 }
 
 // lua_tostring
@@ -622,8 +583,44 @@ func (L *State) ToPointer(index int) uintptr {
 
 // lua_tothread
 func (L *State) ToThread(index int) *State {
-	//TODO: find a way to link lua_State* to existing *State, return that
-	return &State{}
+	ptr := (*C.lua_State)(unsafe.Pointer(C.lua_tothread(L.s, C.int(index))))
+	if ptr == nil {
+		return nil
+	}
+	return L.ToThreadHelper(ptr)
+}
+
+func (L *State) ToThreadHelper(ptr *C.lua_State) *State {
+	if ptr == nil {
+		return nil
+	}
+	upos := int(C.clua_dedup_coro(ptr))
+	already := L.MainCo.AllCoro[upos]
+	if already != nil {
+		return already
+	}
+
+	newstate := &State{
+		s:       ptr,
+		Shared:  L.Shared,
+		MainCo:  L.MainCo,
+		CmainCo: L.MainCo.s,
+		Index:   -1, // not the main state/main thread.
+		Upos:    upos,
+	}
+	// don't register non-main threads in gostates[].
+
+	// asserts that (Upos != 1)
+	if newstate.Upos == 1 {
+		panic(fmt.Sprintf("assert violated: we expected newstate.Upos to not be 1 for any non-main thread/coroutine stated! our code in c-golua.c depends on that"))
+
+	}
+	if newstate.Upos == -1 {
+		panic(fmt.Sprintf("assert violated: we expected newstate.Upos to not be -1 for any not known coroutine!"))
+
+	}
+	newstate.MainCo.AllCoro[newstate.Upos] = newstate
+	return newstate
 }
 
 // lua_touserdata
@@ -743,4 +740,105 @@ func (L *State) PushInt64(n int64) {
 
 func (L *State) PushUint64(u uint64) {
 	C.clua_luajit_push_cdata_uint64(L.s, C.uint64_t(u))
+}
+
+// jea
+func DumpLuaStack(L *State) {
+	fmt.Printf("\n%s\n", DumpLuaStackAsString(L))
+}
+
+func DumpLuaStackAsString(L *State) (s string) {
+	var top int
+
+	top = L.GetTop()
+	s += fmt.Sprintf("========== begin DumpLuaStack: top = %v\n", top)
+	for i := top; i >= 1; i-- {
+
+		t := L.Type(i)
+		s += fmt.Sprintf("DumpLuaStack: i=%v, t= %v\n", i, t)
+		s += LuaStackPosToString(L, i)
+	}
+	s += fmt.Sprintf("========= end of DumpLuaStack\n")
+	return
+}
+
+func LuaStackPosToString(L *State, i int) string {
+	t := L.Type(i)
+
+	switch t {
+	case LUA_TNONE: // -1
+		return fmt.Sprintf("LUA_TNONE; i=%v was invalid index\n", i)
+	case LUA_TNIL:
+		return fmt.Sprintf("LUA_TNIL: nil\n")
+	case LUA_TSTRING:
+		return fmt.Sprintf(" String : \t%v\n", L.ToString(i))
+	case LUA_TBOOLEAN:
+		return fmt.Sprintf(" Bool : \t\t%v\n", L.ToBoolean(i))
+	case LUA_TNUMBER:
+		return fmt.Sprintf(" Number : \t%v\n", L.ToNumber(i))
+	case LUA_TTABLE:
+		return fmt.Sprintf(" Table : \n%s\n", dumpTableString(L, i))
+
+	case 10: // LUA_TCDATA aka cdata
+		ctype := L.LuaJITctypeID(i)
+		switch ctype {
+		case 5: //  int8
+		case 6: //  uint8
+		case 7: //  int16
+		case 8: //  uint16
+		case 9: //  int32
+		case 10: //  uint32
+		case 11: //  int64
+			val := L.CdataToInt64(i)
+			return fmt.Sprintf(" int64: '%v'\n", val)
+		case 12: //  uint64
+			val := L.CdataToUint64(i)
+			return fmt.Sprintf(" uint64: '%v'\n", val)
+		case 13: //  float32
+		case 14: //  float64
+
+		case 0: // means it wasn't a ctype
+		}
+
+	case LUA_TUSERDATA:
+		return fmt.Sprintf(" Type(code %v/ LUA_TUSERDATA) : 0x%x with pointer %p\n", t, L.ToPointer(i), L.ToUserdata(i))
+	case LUA_TFUNCTION:
+		return fmt.Sprintf(" Type(code %v/ LUA_TFUNCTION) : 0x%x\n", t, L.ToPointer(i))
+	case LUA_TTHREAD:
+		return fmt.Sprintf(" Type(code %v/ LUA_TTHREAD) : 0x%x\n", t, L.ToPointer(i))
+	case LUA_TLIGHTUSERDATA:
+		return fmt.Sprintf(" Type(code %v/ LUA_TLIGHTUSERDATA) : 0x%x with pointer %p\n", t, L.ToPointer(i), L.ToUserdata(i))
+	default:
+	}
+	return fmt.Sprintf(" Type(code %v) : 0x%x, no auto-print available.\n", t, L.ToPointer(i))
+}
+
+func dumpTableString(L *State, index int) (s string) {
+
+	// Push another reference to the table on top of the stack (so we know
+	// where it is, and this function can work for negative, positive and
+	// pseudo indices
+	L.PushValue(index)
+	// stack now contains: -1 => table
+	L.PushNil()
+	// stack now contains: -1 => nil; -2 => table
+	for L.Next(-2) != 0 {
+
+		// stack now contains: -1 => value; -2 => key; -3 => table
+		// copy the key so that lua_tostring does not modify the original
+		L.PushValue(-2)
+		// stack now contains: -1 => key; -2 => value; -3 => key; -4 => table
+		key := L.ToString(-1)
+		value := L.ToString(-2)
+		s += fmt.Sprintf("'%s' => '%s'\n", key, value)
+		// pop value + copy of key, leaving original key
+		L.Pop(2)
+		// stack now contains: -1 => key; -2 => table
+	}
+	// stack now contains: -1 => table (when lua_next returns 0 it pops the key
+	// but does not push anything.)
+	// Pop table
+	L.Pop(1)
+	// Stack is now the same as it was on entry to this function
+	return
 }
