@@ -1,21 +1,19 @@
 Go Bindings for the lua C API
 =========================
 
-[![Build Status](https://travis-ci.org/aarzilli/golua.svg?branch=master)](https://travis-ci.org/aarzilli/golua)
-
 Simplest way to install:
 
-	# go get -u github.com/aarzilli/golua/lua
+	# go get -u github.com/glycerine/golua/lua
 
 Will work as long as your compiler can find a shared object called lua5.1 on linux, or lua anywhere else.
 If your linux system uses "lua" as the shared object name for lua (for example, Fedora Core does this) you can install using:
 
-	# go get -u -tags llua github.com/aarzilli/golua/lua
+	# go get -u -tags llua github.com/glycerine/golua/lua
 
 
 You can then try to run the examples:
 
-	$ cd /usr/local/go/src/pkg/github.com/aarzilli/golua/example/
+	$ cd /usr/local/go/src/pkg/github.com/glycerine/golua/example/
 	$ go run basic.go
 	$ go run alloc.go
 	$ go run panic.go
@@ -132,7 +130,7 @@ To link with [luajit-2.0.x](http://luajit.org/luajit.html), you can use CGO_CFLA
 ```
 $ CGO_CFLAGS=`pkg-config luajit --cflags`
 $ CGO_LDFLAGS=`pkg-config luajit --libs-only-L`
-$ go get -f -u -tags luajit github.com/aarzilli/golua/lua
+$ go get -f -u -tags luajit github.com/glycerine/golua/lua
 ```
 
 CONTRIBUTORS
@@ -152,7 +150,7 @@ CONTRIBUTORS
 * Admin36
 * Pierre Neidhardt (@Ambrevar)
 * HuangWei (@huangwei1024)
-* Jason Aten
+* Jason E. Aten
 
 SEE ALSO
 ---------------------
