@@ -150,6 +150,7 @@ CONTRIBUTORS
 * Admin36
 * Pierre Neidhardt (@Ambrevar)
 * HuangWei (@huangwei1024)
+* Jason Aten
 
 SEE ALSO
 ---------------------
